@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import google.generativeai as genai
 from google import genai as direct_genai
@@ -11,6 +12,9 @@ from dotenv import load_dotenv
 import uvicorn
 from typing import Optional, List, Dict
 import tempfile
+from PIL import Image
+from io import BytesIO
+import base64
 
 # 載入環境變數
 load_dotenv()
@@ -70,6 +74,16 @@ class DocumentRequest(BaseModel):
 class DocumentResponse(BaseModel):
     content: str
     file_name: str
+
+# 定義圖片生成請求和回應模型
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    return_base64: bool = False  # 是否返回 base64 編碼的圖片
+
+class ImageGenerationResponse(BaseModel):
+    image_base64: Optional[str] = None
+    message: str
+    filename: Optional[str] = None
 
 # 檢查 API 金鑰函數
 def verify_api_key():
@@ -135,10 +149,94 @@ def extract_ppt_content(file_path: pathlib.Path) -> Optional[str]:
         print(f"提取文件內容時發生錯誤 ({file_path.name}): {e}")
         return None
 
+def generate_image(prompt: str, return_base64: bool = False) -> dict:
+    """使用 Gemini API 生成圖片"""
+    try:
+        client = direct_genai.Client(api_key=API_KEY)
+        model_id = "gemini-2.5-flash-image-preview"
+        
+        print(f"正在生成圖片，提示: {prompt}")
+        
+        response = client.models.generate_content(
+            model=model_id,
+            contents=[prompt],
+        )
+        
+        # 處理回應
+        generated_text = ""
+        image_data = None
+        
+        for part in response.candidates[0].content.parts:
+            if part.text is not None:
+                generated_text += part.text
+                print(f"生成的文字描述: {part.text}")
+            elif part.inline_data is not None:
+                print(f"檢測到圖片數據，MIME 類型: {part.inline_data.mime_type}")
+                print(f"數據類型: {type(part.inline_data.data)}")
+                
+                # 處理不同類型的數據
+                if isinstance(part.inline_data.data, bytes):
+                    image_data = part.inline_data.data
+                elif isinstance(part.inline_data.data, str):
+                    # 如果是 base64 字符串，先解碼
+                    try:
+                        image_data = base64.b64decode(part.inline_data.data)
+                    except Exception as decode_error:
+                        print(f"無法解碼 base64 數據: {decode_error}")
+                        continue
+                else:
+                    print(f"未知的數據格式: {type(part.inline_data.data)}")
+                    continue
+                
+                print("圖片數據處理成功")
+        
+        if image_data:
+            try:
+                # 驗證圖片數據
+                image = Image.open(BytesIO(image_data))
+                print(f"圖片格式: {image.format}, 尺寸: {image.size}")
+                
+                # 將圖片保存到臨時檔案
+                import time
+                filename = f"generated_image_{int(time.time())}.png"
+                image.save(filename, "PNG")
+                print(f"圖片已保存為: {filename}")
+                
+                result = {
+                    "message": f"圖片生成成功。{generated_text}",
+                    "filename": filename
+                }
+                
+                if return_base64:
+                    # 如果需要返回 base64 編碼
+                    image_base64 = base64.b64encode(image_data).decode('utf-8')
+                    result["image_base64"] = image_base64
+                
+                return result
+                
+            except Exception as img_error:
+                print(f"處理圖片時發生錯誤: {img_error}")
+                return {
+                    "message": f"圖片數據處理失敗: {str(img_error)}。文字回應: {generated_text}",
+                    "filename": None
+                }
+        else:
+            return {
+                "message": f"未能生成圖片，但有文字回應: {generated_text}",
+                "filename": None
+            }
+        
+    except Exception as e:
+        print(f"生成圖片時發生錯誤: {e}")
+        return {
+            "message": f"生成圖片時發生錯誤: {str(e)}",
+            "filename": None
+        }
+
 @app.get("/")
 def read_root():
     """API 根路徑，返回歡迎信息"""
-    return {"message": "歡迎使用 Gemini AI 服務 API", "status": "運行中", "features": ["YouTube摘要", "文件理解", "智能查詢"]}
+    return {"message": "歡迎使用 Gemini AI 服務 API", "status": "運行中", "features": ["YouTube摘要", "文件理解", "智能查詢", "圖片生成"]}
 
 @app.get("/health")
 def health_check():
@@ -236,6 +334,69 @@ def grounding_query(
         return {
             "summary": result_text,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/image_generation", response_model=ImageGenerationResponse, responses={500: {"model": ErrorResponse}})
+def generate_image_get(
+    prompt: str = Query(..., description="圖片生成提示"),
+    return_base64: bool = Query(False, description="是否返回 base64 編碼的圖片"),
+    _: bool = Depends(verify_api_key)
+):
+    """
+    使用 Gemini 模型生成圖片（GET 方法）
+    
+    - **prompt**: 圖片生成的提示詞
+    - **return_base64**: 是否返回 base64 編碼的圖片資料
+    
+    回傳:
+    - **message**: 生成結果訊息
+    - **filename**: 生成的圖片檔案名稱（如果成功）
+    - **image_base64**: base64 編碼的圖片資料（如果 return_base64=true）
+    """
+    try:
+        result = generate_image(prompt, return_base64)
+        return ImageGenerationResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/image_generation", response_model=ImageGenerationResponse, responses={500: {"model": ErrorResponse}})
+def generate_image_post(
+    request: ImageGenerationRequest,
+    _: bool = Depends(verify_api_key)
+):
+    """
+    使用 Gemini 模型生成圖片（POST 方法）
+    
+    - **request**: 包含圖片生成提示和選項的請求
+    
+    回傳:
+    - **message**: 生成結果訊息
+    - **filename**: 生成的圖片檔案名稱（如果成功）
+    - **image_base64**: base64 編碼的圖片資料（如果 return_base64=true）
+    """
+    try:
+        result = generate_image(request.prompt, request.return_base64)
+        return ImageGenerationResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download_image/{filename}")
+def download_generated_image(filename: str):
+    """
+    下載生成的圖片檔案
+    
+    - **filename**: 圖片檔案名稱
+    """
+    try:
+        if os.path.exists(filename) and filename.startswith("generated_image_"):
+            return FileResponse(
+                path=filename,
+                media_type="image/png",
+                filename=filename
+            )
+        else:
+            raise HTTPException(status_code=404, detail="圖片檔案不存在")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

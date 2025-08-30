@@ -1,3 +1,4 @@
 .env
 *__pycache__
 test_gemini_url_ground.py
+pdf/

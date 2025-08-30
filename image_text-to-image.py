@@ -31,13 +31,6 @@ timestamp = datetime.datetime.now().strftime("%m%d_%H%M%S")
 with open(f"response_{timestamp}.txt", "w", encoding="utf-8") as f:
     f.write(str(response))
 
-# for part in response.candidates[0].content.parts:
-#     if part.text is not None:
-#         print(part.text)
-#     elif part.inline_data is not None:
-#         image = Image.open(BytesIO(part.inline_data.data))
-#         image.save("generated_image.png")
-
 for idx, part in enumerate(response.candidates[0].content.parts):
     if part.text:
         print(part.text)
@@ -45,6 +38,6 @@ for idx, part in enumerate(response.candidates[0].content.parts):
         # base64 解碼
         img_data = base64.b64decode(part.inline_data.data)
         image = Image.open(BytesIO(img_data))
-        filename = f"generated_image_{timestamp}.png"
+        filename = f"image/generated_image_{timestamp}.png"
         image.save(filename)
         print(f"✅ Image saved: {filename}")
